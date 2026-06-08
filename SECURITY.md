@@ -45,11 +45,13 @@ A signed-binary release flow (cosign or minisign) is on the roadmap; PRs welcome
 
 ## Reporting vulnerabilities
 
-If you find a security issue in the agent (privilege escalation, arbitrary file write outside the documented paths, unbounded memory exhaustion, etc.), please **do not** open a public issue. Email the maintainer:
+If you find a security issue in the agent (privilege escalation, arbitrary file write outside the documented paths, unbounded memory exhaustion, etc.), please **do not** open a public issue.
 
-- aaronkidwell95@outlook.com
+Report it through the platform's bug-report form while logged in:
 
-Include enough detail to reproduce. I'll respond within 72 hours.
+- <https://cyberkiller.net/report>
+
+Set category to **BUG** and include enough detail to reproduce. The operator will respond and coordinate a fix before any public disclosure.
 
 ## Reproducible builds
 
