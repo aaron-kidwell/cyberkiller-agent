@@ -1,0 +1,7 @@
+cyberkiller-agent
+cyberkiller-agent.update
+*.log
+*.swp
+.idea/
+.vscode/
+dist/
