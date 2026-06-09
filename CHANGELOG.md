@@ -4,6 +4,30 @@ All notable changes to the CyberKiller agent. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [semantic versioning](https://semver.org/).
 
+## [4.7.7] - 2026-06-09
+
+### Added
+- High-visibility "WHAT NOW" panel printed on successful connect (foreground
+  and background modes). Spells out how to disconnect, where to find logs,
+  hub URL, bug report URL, and rules link — so first-time players don't have
+  to grep for it.
+- Public-DNS fallback (`https://cyberkiller.net/api`) appended to the API URL
+  variant list. An agent built with a broken or unreachable `defaultAPI` can
+  still self-heal via auto-update without requiring the WireGuard tunnel,
+  because the fallback is reachable pre-tunnel over the open internet.
+
+### Changed
+- Official binary now builds with `defaultAPI=https://cyberkiller.net/api`
+  (was the arena-internal `http://10.66.0.1:8082`, which created a
+  chicken-and-egg problem: agents couldn't verify their token before the
+  tunnel was up because the tunnel was what made the API reachable).
+
+### Fixed
+- First-time connect no longer fails with "server unreachable" on a clean
+  install when the agent has no prior state.
+- Auto-update path now works even if every other variant is unreachable,
+  thanks to the public-DNS fallback.
+
 ## [4.7.6] - 2026-06-08
 
 ### Added

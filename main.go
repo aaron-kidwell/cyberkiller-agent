@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const agentVersion = "4.7.6"
+const agentVersion = "4.7.7"
 const stateFile = "/var/run/cyberkiller-agent.json"
 
 // defaultAPI is the URL the agent uses to reach the CyberKiller control plane
@@ -279,10 +279,8 @@ func spawnBackground(st agentState) {
 	st.BgPID = cmd.Process.Pid
 	saveState(st)
 
-	fmt.Printf("  Agent running in background (PID %d)\n", st.BgPID)
-	fmt.Printf("  Logs:       tail -f %s\n", logPath)
-	fmt.Printf("  Disconnect: sudo ./cyberkiller-agent disconnect\n")
-	fmt.Printf("  Status:     sudo ./cyberkiller-agent status\n\n")
+	fmt.Printf("  Agent running in background (PID %d)\n\n", st.BgPID)
+	printNextSteps(true, logPath)
 }
 
 // teardown brings wg0 down, removes the kill switch, sends a disconnect
@@ -547,10 +545,16 @@ type updateInfo struct {
 // Empty in source so the public repo doesn't leak deployment-specific addresses.
 var lanFallback = ""
 
+// publicFallback is the always-reachable public URL. Hardcoded so an agent
+// built with a broken / arena-internal defaultAPI can still self-heal via
+// auto-update. If you fork this for a private deployment, change it.
+const publicFallback = "https://cyberkiller.net/api"
+
 // apiURLVariants returns the given URL plus fallbacks:
 // - port-8082 variant for old agents saved with :8080
 // - LAN IP fallback (build-time) for same-LAN testers where router doesn't hairpin
 // - WireGuard hub IP variant (10.66.0.1:8082) for after the tunnel is up
+// - public-DNS fallback so an old broken binary can still reach the update server
 func apiURLVariants(api string) []string {
 	urls := []string{api}
 	// port fallback: :8080/:8081 → :8082
@@ -571,6 +575,10 @@ func apiURLVariants(api string) []string {
 			port = "8081"
 		}
 		urls = append(urls, "http://10.66.0.1:"+port)
+	}
+	// Public-DNS fallback — always reachable, always last so primary wins normally.
+	if !strings.Contains(api, "cyberkiller.net") {
+		urls = append(urls, publicFallback)
 	}
 	return urls
 }
@@ -822,9 +830,45 @@ func printWelcome(handle, arenaIP string, hills []hillInfo, pts arenaStats) {
 		fmt.Printf("  Targets:   %d active — check the hub at the arena URL\n", len(hills))
 	}
 	fmt.Println()
-	fmt.Println("  Heartbeating every 10s.  Ctrl+C or kill to disconnect cleanly.")
-	fmt.Println("  Background: sudo ./cyberkiller-agent connect --detach")
-	fmt.Println("  Disconnect: sudo ./cyberkiller-agent disconnect")
+	printNextSteps(false, "")
+}
+
+// printNextSteps renders a high-visibility "WHAT TO DO NEXT" panel so first-time
+// users always know how to disconnect, check status, and where to go for help.
+// Same content shown in both foreground and background modes — minor wording
+// difference for the heartbeat line.
+func printNextSteps(background bool, logPath string) {
+	const bar = "  ────────────────────────────────────────────────────────────"
+	fmt.Println(bar)
+	fmt.Println("  WHAT NOW")
+	fmt.Println(bar)
+	fmt.Println("  ✓  You are connected to the arena over WireGuard.")
+	fmt.Println("     Range machines live at 10.66.20.x — start with nmap.")
+	fmt.Println()
+	fmt.Println("  ↗  Open the hub:        https://cyberkiller.net/hub")
+	fmt.Println("     Scoreboard, chat, machine list, intel drops.")
+	fmt.Println()
+	if background {
+		fmt.Printf("  📜 Tail logs:           tail -f %s\n", logPath)
+	} else {
+		fmt.Println("  ⌨  Heartbeating every 10s. This window must stay open.")
+		fmt.Println("     To run in background instead: Ctrl+C, then")
+		fmt.Println("       sudo ./cyberkiller-agent connect --detach")
+	}
+	fmt.Println()
+	fmt.Println("  ⛔ DISCONNECT (cleanly tears down VPN + kill-switch):")
+	if background {
+		fmt.Println("       sudo ./cyberkiller-agent disconnect")
+	} else {
+		fmt.Println("       Ctrl+C in this window")
+		fmt.Println("       — or from another shell —")
+		fmt.Println("       sudo ./cyberkiller-agent disconnect")
+	}
+	fmt.Println()
+	fmt.Println("  🔧 Status:               sudo ./cyberkiller-agent status")
+	fmt.Println("  🐛 Bug / issue:          https://cyberkiller.net/report")
+	fmt.Println("  📖 Rules + scoring:      https://cyberkiller.net/hub?tab=rules")
+	fmt.Println(bar)
 	fmt.Println()
 }
 
