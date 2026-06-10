@@ -16,7 +16,7 @@ import (
 )
 
 // ghostPNG is the transparent ghost mascot, baked into the binary so the photo
-// renders for anyone who runs the agent — no external file needed.
+// renders for anyone who runs the agent, no external file needed.
 //
 //go:embed ghost.png
 var ghostPNG []byte
@@ -41,7 +41,7 @@ var termBG = color.RGBA{R: 8, G: 6, B: 13, A: 255}
 func detectColorMode() colorMode {
 	term := os.Getenv("TERM")
 	if term == "" || term == "dumb" {
-		// No interactive terminal info — but if stdout is a tty we still try
+		// No interactive terminal info, but if stdout is a tty we still try
 		// truecolor (most pipelines that reach here are real terminals).
 		if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
 			return colorTrue
@@ -51,7 +51,7 @@ func detectColorMode() colorMode {
 	return colorTrue
 }
 
-// ── ANSI helpers (pure stdlib — no TUI framework, keeps the agent auditable) ──
+// ── ANSI helpers (pure stdlib, no TUI framework, keeps the agent auditable) ──
 
 const (
 	esc       = "\033["
@@ -86,7 +86,7 @@ func moveTo(row, col int) string { return fmt.Sprintf("%s%d;%dH", esc, row, col)
 type winsize struct{ Row, Col, X, Y uint16 }
 
 // termSize returns the real terminal dimensions by querying the stdout fd with
-// ioctl(TIOCGWINSZ) — the most reliable method. Falls back to `stty size` and
+// ioctl(TIOCGWINSZ), the most reliable method. Falls back to `stty size` and
 // then 80x24.
 func termSize() (rows, cols int) {
 	ws := &winsize{}
@@ -121,7 +121,7 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// ── Ghost ANSI art — compact neon mascot rendered with block glyphs ──────────
+// ── Ghost ANSI art, compact neon mascot rendered with block glyphs ──────────
 // Drawn in pink/magenta with cyan lightning to echo the web logo.
 func ghostArt() []string {
 	p := cPink
@@ -302,28 +302,34 @@ func runTUI(args []string) {
 			arenaIP = st.ArenaIP
 		}
 	}
-	// `tui` subcommand: show the fake boot only in --demo; never run heartbeats.
-	tuiDashboard(handle, arenaIP, *iface, *demo, *demo, nil)
+	// `tui` subcommand previews the full experience: always show the boot
+	// animation and a cosmetic shutdown on quit (no real teardown).
+	tuiDashboard(handle, arenaIP, *iface, *demo, true, func() {
+		shutdownAnim(handle, nil)
+	})
 }
 
 // tuiDashboard runs the live dashboard on the alternate screen until the user
 // quits (q / Ctrl+C). demo simulates traffic; otherwise it reads the real wg
 // interface. showBoot replays the connect animation first. onQuit (optional)
-// runs after the screen is restored — used by the connect flow to tear down
+// runs after the screen is restored, used by the connect flow to tear down
 // the tunnel. Heartbeats, if any, are driven by the caller's goroutine.
 func tuiDashboard(handle, arenaIP, iface string, demo, showBoot bool, onQuit func()) {
 	restore := setRaw()
+	// Defers run LIFO: register onQuit FIRST so it runs LAST, after cleanup
+	// has left the alt screen, so the shutdown animation prints on the normal
+	// screen and persists (instead of being wiped with the alt buffer).
+	defer func() {
+		if onQuit != nil {
+			onQuit()
+		}
+	}()
 	fmt.Print(altOn + hideCur + clearAll)
 	cleanup := func() {
 		fmt.Print(showCur + altOff + resetSGR)
 		restore()
 	}
 	defer cleanup()
-	defer func() {
-		if onQuit != nil {
-			onQuit()
-		}
-	}()
 
 	if showBoot {
 		bootSequence(handle, arenaIP)
@@ -488,10 +494,13 @@ func bootSequence(handle, arenaIP string) {
 	fmt.Print(clearAll + homeCur)
 }
 
-// shutdownSequence performs the real teardown (wg down, kill-switch removal,
-// disconnect heartbeat) while showing the same styled, paced animation as the
-// boot sequence — so connect and disconnect feel consistent.
-func shutdownSequence(st agentState) {
+// shutdownSequence performs the REAL teardown with the styled animation.
+func shutdownSequence(st agentState) { shutdownAnim(st.Handle, &st) }
+
+// shutdownAnim shows the disconnect animation, matching the boot sequence. If
+// st != nil it performs the real teardown actions (wg down, kill-switch, sign
+// off) between the animated steps; if nil it's purely cosmetic (preview).
+func shutdownAnim(handle string, st *agentState) {
 	pause := func(d time.Duration) { time.Sleep(d) }
 	fmt.Println()
 	fmt.Println("  " + cMag + "┌─────────────────────────────────────────┐" + resetSGR)
@@ -501,27 +510,33 @@ func shutdownSequence(st agentState) {
 	pause(350 * time.Millisecond)
 
 	fmt.Print("  [▸] Tearing down WireGuard tunnel... ")
-	exec.Command("wg-quick", "down", "wg0").Run()
+	if st != nil {
+		exec.Command("wg-quick", "down", "wg0").Run()
+	}
 	pause(500 * time.Millisecond)
 	fmt.Println(cGreen + "✓" + resetSGR)
 
 	fmt.Print("  [▸] Removing egress kill-switch...   ")
-	removeKillSwitch()
+	if st != nil {
+		removeKillSwitch()
+	}
 	pause(400 * time.Millisecond)
 	fmt.Println(cGreen + "✓" + resetSGR)
 
 	fmt.Print("  [▸] Signing off the arena...         ")
-	sendHeartbeat(st, false)
+	if st != nil {
+		sendHeartbeat(*st, false)
+		st.BgPID = 0
+		saveState(*st)
+	}
 	pause(450 * time.Millisecond)
 	fmt.Println(cGreen + "✓" + resetSGR)
 
-	st.BgPID = 0
-	saveState(st)
 	pause(300 * time.Millisecond)
-	fmt.Printf("\n  "+cDim+"Disconnected"+resetSGR+", %s. See you back in the arena.\n\n", st.Handle)
+	fmt.Printf("\n  "+cDim+"Disconnected"+resetSGR+", %s. See you back in the arena.\n\n", handle)
 }
 
-// rndF returns a pseudo-random float in [0,1) from a cheap xorshift PRNG —
+// rndF returns a pseudo-random float in [0,1) from a cheap xorshift PRNG;
 // avoids importing math/rand for demo traffic generation.
 var rndState uint64 = 0x9e3779b97f4a7c15
 
@@ -631,7 +646,7 @@ func render(frame int, start time.Time, handle, arenaIP, iface string, connected
 
 	b.WriteString(sep + "\n")
 
-	// Bandwidth — btop-style braille area graphs that fill the width and scale
+	// Bandwidth, btop-style braille area graphs that fill the width and scale
 	// with height. IN graph is a cyan gradient, OUT is magenta.
 	graphCols := innerW - 4
 	cyanLow := color.RGBA{8, 90, 110, 255}
@@ -639,7 +654,7 @@ func render(frame int, start time.Time, handle, arenaIP, iface string, connected
 	magLow := color.RGBA{90, 20, 80, 255}
 	magHigh := color.RGBA{232, 52, 198, 255}
 
-	// DOWNLOAD label — real wg counters: rate, packets/sec, total bytes/packets, peak
+	// DOWNLOAD label, real wg counters: rate, packets/sec, total bytes/packets, peak
 	row("  " + cCyan + boldSGR + "▼ DOWNLOAD" + resetSGR +
 		cDim + " (" + iface + ")  " + resetSGR + cCyan + humanRate(rxRate) + resetSGR +
 		cDim + "  " + resetSGR + cTxt + humanCount(uint64(rxPps)) + " pps" + resetSGR +

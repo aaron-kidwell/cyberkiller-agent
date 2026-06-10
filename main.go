@@ -11,17 +11,22 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-const agentVersion = "4.8.0"
-const stateFile = "/var/run/cyberkiller-agent.json"
+const agentVersion = "4.8.2"
+
+// stateFile persists the session across reboots (/var/run is a tmpfs that's
+// wiped on reboot, which made the agent "forget" the saved token).
+const stateFile = "/var/lib/cyberkiller-agent.json"
+const legacyStateFile = "/var/run/cyberkiller-agent.json"
 
 // defaultAPI is the URL the agent uses to reach the CyberKiller control plane
-// for register/heartbeat/flag-submit/etc. It is intentionally empty in source —
+// for register/heartbeat/flag-submit/etc. It is intentionally empty in source;
 // production releases set it at build time via:
 //
 //	go build -ldflags "-X main.defaultAPI=https://your-range.example/api"
@@ -59,6 +64,9 @@ func main() {
 		runTUI(os.Args[2:])
 	default:
 		// The one command players ever run: `sudo ./cyberkiller-agent`.
+		// Check root up front so a non-sudo run is told immediately (before any
+		// token prompt) and can read the root-owned saved session.
+		requireRoot()
 		// If a session is already saved and no token was supplied, resume it;
 		// otherwise do a fresh connect (prompting for the token if needed).
 		if _, err := loadState(); err == nil && !hasPositionalArg(os.Args[1:]) {
@@ -99,8 +107,8 @@ func stdoutIsTTY() bool {
 // promptToken interactively asks the player to paste their invite token, so the
 // only thing they ever need to type is `./cyberkiller-agent`.
 func promptToken() string {
-	fmt.Println("  First time here — paste your invite token to connect.")
-	fmt.Println("  (Get one at " + publicSite() + " — it starts with INV-)")
+	fmt.Println("  First time here, paste your invite token to connect.")
+	fmt.Println("  (Get one at " + publicSite() + ", it starts with INV-)")
 	fmt.Print("\n  Invite token: ")
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
@@ -178,7 +186,7 @@ func runFirstConnect() {
 	checkForUpdate(*api)
 
 	if token == "" {
-		// No token on the command line — just ask for it. Players never need
+		// No token on the command line, just ask for it. Players never need
 		// to remember any flags; `sudo ./cyberkiller-agent` is the whole UX.
 		token = promptToken()
 		if token == "" {
@@ -244,7 +252,7 @@ func runFirstConnect() {
 	if verifyTunnel(3 * time.Second) {
 		fmt.Println("✓")
 	} else {
-		fmt.Println("⚠  (handshake pending — give it a few seconds)")
+		fmt.Println("⚠  (handshake pending, give it a few seconds)")
 	}
 
 	st := agentState{
@@ -269,7 +277,7 @@ func runFirstConnect() {
 func runReconnect() {
 	st, err := loadState()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "  No saved session — register first: sudo ./cyberkiller-agent INVITE_TOKEN")
+		fmt.Fprintln(os.Stderr, "  No saved session, register first: sudo ./cyberkiller-agent INVITE_TOKEN")
 		os.Exit(1)
 	}
 	requireRoot()
@@ -306,7 +314,7 @@ func runReconnect() {
 	if verifyTunnel(5 * time.Second) {
 		fmt.Println("✓")
 	} else {
-		fmt.Println("⚠  (handshake pending — give it a few seconds)")
+		fmt.Println("⚠  (handshake pending, give it a few seconds)")
 	}
 
 	saveState(*st)
@@ -343,7 +351,7 @@ func runLoop(st agentState, detach bool) {
 			sendHeartbeat(st, true)
 		case <-updateTick.C:
 			if info, available, _ := fetchUpdateInfo(st.APIBase); available {
-				fmt.Printf("\n  [!] Update available (v%s) — auto-updating...\n", info.Version)
+				fmt.Printf("\n  [!] Update available (v%s), auto-updating...\n", info.Version)
 				teardown(st)
 				applyUpdate(st.APIBase, info, true) // reconnect=true: exec new binary as "connect"
 			}
@@ -362,7 +370,7 @@ func spawnBackground(st agentState) {
 		logPath = logFile.Name()
 	}
 
-	// Re-exec as "connect" (reconnect) — wg0 is already up, state is saved
+	// Re-exec as "connect" (reconnect), wg0 is already up, state is saved
 	cmd := exec.Command(exe, "connect")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -392,7 +400,7 @@ func runDisconnect() {
 
 	st, err := loadState()
 	if err != nil {
-		// No saved session — still clean up wg0 in case it's lingering
+		// No saved session, still clean up wg0 in case it's lingering
 		fmt.Println("  No active session found. Cleaning up tunnel...")
 		exec.Command("wg-quick", "down", "wg0").Run()
 		removeKillSwitch()
@@ -561,7 +569,7 @@ func register(api, token, handle, pub string) (*regResp, string, error) {
 }
 
 // sendHeartbeat reports tunnel state to the API.
-// tunnelUp=false sends a disconnect heartbeat — the server marks the player offline immediately.
+// tunnelUp=false sends a disconnect heartbeat, the server marks the player offline immediately.
 func sendHeartbeat(st agentState, tunnelUp bool) {
 	if !tunnelUp {
 		// Use the stored state value rather than checking wg show (wg0 may already be down)
@@ -630,7 +638,7 @@ type updateInfo struct {
 //
 //	go build -ldflags "-X main.lanFallback=http://10.0.0.42:8080"
 //
-// When set, the agent tries it after the primary defaultAPI fails — useful
+// When set, the agent tries it after the primary defaultAPI fails, useful
 // for LAN testers whose home router doesn't hairpin NAT to the public IP.
 // Empty in source so the public repo doesn't leak deployment-specific addresses.
 var lanFallback = ""
@@ -666,7 +674,7 @@ func apiURLVariants(api string) []string {
 		}
 		urls = append(urls, "http://10.66.0.1:"+port)
 	}
-	// Public-DNS fallback — always reachable, always last so primary wins normally.
+	// Public-DNS fallback, always reachable, always last so primary wins normally.
 	if !strings.Contains(api, "cyberkiller.net") {
 		urls = append(urls, publicFallback)
 	}
@@ -704,31 +712,31 @@ func applyUpdate(api string, v updateInfo, reconnect bool) {
 		}
 	}
 	if dlResp == nil {
-		fmt.Println("FAIL — keeping current version")
+		fmt.Println("FAIL, keeping current version")
 		return
 	}
 	defer dlResp.Body.Close()
 
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Println("FAIL — cannot locate binary")
+		fmt.Println("FAIL, cannot locate binary")
 		return
 	}
 	tmp := exe + ".update"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		fmt.Println("FAIL — cannot write update file")
+		fmt.Println("FAIL, cannot write update file")
 		return
 	}
 	if _, err := io.Copy(f, dlResp.Body); err != nil {
 		f.Close(); os.Remove(tmp)
-		fmt.Println("FAIL — download interrupted")
+		fmt.Println("FAIL, download interrupted")
 		return
 	}
 	f.Close()
 	if err := os.Rename(tmp, exe); err != nil {
 		os.Remove(tmp)
-		fmt.Println("FAIL — cannot replace binary")
+		fmt.Println("FAIL, cannot replace binary")
 		return
 	}
 	fmt.Println("✓")
@@ -745,7 +753,7 @@ func checkForUpdate(api string) {
 	fmt.Print("  [▸] Checking for updates...          ")
 	info, available, reachable := fetchUpdateInfo(api)
 	if !reachable {
-		fmt.Printf("v%s (server unreachable — skipping)\n", agentVersion)
+		fmt.Printf("v%s (server unreachable, skipping)\n", agentVersion)
 		return
 	}
 	if !available {
@@ -765,13 +773,21 @@ func checkForUpdate(api string) {
 
 func saveState(st agentState) {
 	b, _ := json.Marshal(st)
+	os.MkdirAll("/var/lib", 0755)
 	os.WriteFile(stateFile, b, 0600)
+	// Best-effort: also keep the legacy path in sync for older tooling.
+	os.WriteFile(legacyStateFile, b, 0600)
 }
 
 func loadState() (*agentState, error) {
+	// Prefer the persistent path; fall back to the legacy /var/run path so an
+	// existing session migrates seamlessly.
 	b, err := os.ReadFile(stateFile)
 	if err != nil {
-		return nil, err
+		b, err = os.ReadFile(legacyStateFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var st agentState
 	json.Unmarshal(b, &st)
@@ -782,11 +798,23 @@ func loadState() (*agentState, error) {
 
 func requireRoot() {
 	if os.Getuid() != 0 {
-		fmt.Fprintln(os.Stderr, "  Error: must run as root (WireGuard requires root)")
-		fmt.Fprintln(os.Stderr, "  Usage: sudo ./cyberkiller-agent <TOKEN>")
+		exe := "./cyberkiller-agent"
+		if e, err := os.Executable(); err == nil {
+			exe = "./" + filepath.Base(e)
+		}
+		fmt.Println()
+		fmt.Println("  " + cMag + "┌─────────────────────────────────────────┐" + resetSGR)
+		fmt.Println("  " + cMag + "│" + cTxt + "       ⚠  ROOT REQUIRED · USE SUDO        " + resetSGR + cMag + "│" + resetSGR)
+		fmt.Println("  " + cMag + "└─────────────────────────────────────────┘" + resetSGR)
+		fmt.Println()
+		fmt.Println("  The agent sets up the WireGuard tunnel + kill-switch,")
+		fmt.Println("  which needs root. It also keeps your saved session here,")
+		fmt.Println("  so running without sudo can't see it and re-asks for your token.")
+		fmt.Println()
+		fmt.Printf("  Run:  "+cCyan+"sudo %s"+resetSGR+"\n\n", exe)
 		os.Exit(1)
 	}
-	// Make sure /usr/sbin and /sbin are searched — some sudo configs strip them.
+	// Make sure /usr/sbin and /sbin are searched, some sudo configs strip them.
 	addPath := func(p string) {
 		cur := os.Getenv("PATH")
 		if !strings.Contains(cur, p) {
@@ -922,7 +950,7 @@ func printWelcome(handle, arenaIP string, hills []hillInfo, pts arenaStats) {
 	fmt.Printf("  Arena IP:  %s\n", arenaIP)
 	fmt.Printf("  Tunnel:    UP\n")
 	if len(hills) > 0 {
-		fmt.Printf("  Targets:   %d active — check the hub at the arena URL\n", len(hills))
+		fmt.Printf("  Targets:   %d active, check the hub at the arena URL\n", len(hills))
 	}
 	fmt.Println()
 	printNextSteps(false, "")
@@ -930,7 +958,7 @@ func printWelcome(handle, arenaIP string, hills []hillInfo, pts arenaStats) {
 
 // printNextSteps renders a high-visibility "WHAT TO DO NEXT" panel so first-time
 // users always know how to disconnect, check status, and where to go for help.
-// Same content shown in both foreground and background modes — minor wording
+// Same content shown in both foreground and background modes, minor wording
 // difference for the heartbeat line.
 func printNextSteps(background bool, logPath string) {
 	const bar = "  ────────────────────────────────────────────────────────────"
@@ -938,7 +966,7 @@ func printNextSteps(background bool, logPath string) {
 	fmt.Println("  WHAT NOW")
 	fmt.Println(bar)
 	fmt.Println("  ✓  You are connected to the arena over WireGuard.")
-	fmt.Println("     Range machines live at 10.66.20.x — start with nmap.")
+	fmt.Println("     Range machines live at 10.66.20.x, start with nmap.")
 	fmt.Println()
 	fmt.Println("  ↗  Open the hub:        https://cyberkiller.net/hub")
 	fmt.Println("     Scoreboard, chat, machine list, intel drops.")
@@ -956,7 +984,7 @@ func printNextSteps(background bool, logPath string) {
 		fmt.Println("       sudo ./cyberkiller-agent disconnect")
 	} else {
 		fmt.Println("       Ctrl+C in this window")
-		fmt.Println("       — or from another shell —")
+		fmt.Println("       or, from another shell:")
 		fmt.Println("       sudo ./cyberkiller-agent disconnect")
 	}
 	fmt.Println()
@@ -989,7 +1017,7 @@ func runStatus() {
 		if proc, err := os.FindProcess(st.BgPID); err == nil && proc.Signal(syscall.Signal(0)) == nil {
 			alive = " (running)"
 		} else {
-			alive = " (dead — run disconnect to clean up)"
+			alive = " (dead, run disconnect to clean up)"
 		}
 		fmt.Printf("  BgPID:     %d%s\n", st.BgPID, alive)
 	}
@@ -1000,7 +1028,7 @@ func runStatus() {
 func runSubmit(args []string) {
 	st, err := loadState()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "  Not connected — run agent with your invite token first.")
+		fmt.Fprintln(os.Stderr, "  Not connected, run agent with your invite token first.")
 		os.Exit(1)
 	}
 	if len(args) < 1 {

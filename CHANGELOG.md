@@ -4,6 +4,25 @@ All notable changes to the CyberKiller agent. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [semantic versioning](https://semver.org/).
 
+## [4.8.2] - 2026-06-10
+
+### Added
+- Animated startup and shutdown sequences in the dashboard (connect and
+  disconnect now feel consistent).
+- Clear "ROOT REQUIRED · USE SUDO" notice shown immediately on a non-sudo run,
+  before any token prompt.
+
+### Changed
+- Session is now persisted to `/var/lib/cyberkiller-agent.json` so it survives
+  reboots (`/var/run` is a tmpfs that was wiped on reboot, making the agent
+  "forget" the saved token). Existing sessions migrate from the old path.
+- Higher-quality ghost: half-block truecolor render that fills the header, with
+  auto color-depth (truecolor with no flags on Kali/Parrot/etc.).
+
+### Fixed
+- btop-style graphs no longer show a false sawtooth (scale to the visible
+  window, not a decaying peak); bandwidth rates corrected; peak is now accurate.
+
 ## [4.8.0] - 2026-06-10
 
 ### Added
