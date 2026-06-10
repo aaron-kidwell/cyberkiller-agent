@@ -4,6 +4,25 @@ All notable changes to the CyberKiller agent. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [semantic versioning](https://semver.org/).
 
+## [4.8.0] - 2026-06-10
+
+### Added
+- **One-command UX.** `sudo ./cyberkiller-agent` is now the only command a
+  player needs. First run prompts for the invite token, connects, and opens a
+  live terminal dashboard; every run after auto-resumes the saved session.
+- **Live TUI dashboard** (pure stdlib — no new dependencies, still auditable):
+  embedded ghost mascot rendered as truecolor half-blocks that scale to the
+  terminal, btop-style braille bandwidth graphs driven by the real `wg0`
+  interface (rx/tx bytes + packets, pps, totals, peak), responsive to resize.
+  Auto color-depth detection (truecolor everywhere; degrades gracefully).
+- Animated startup and shutdown sequences.
+
+### Changed
+- Default invocation goes straight to connect + dashboard. The `connect`,
+  `disconnect`, `status`, and `submit` subcommands still work; `tui --demo`
+  runs the dashboard with simulated traffic for screenshots/testing.
+- Auto-update now re-execs straight into the dashboard when a session exists.
+
 ## [4.7.7] - 2026-06-09
 
 ### Added

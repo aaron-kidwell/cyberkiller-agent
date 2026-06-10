@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const agentVersion = "4.7.7"
+const agentVersion = "4.8.0"
 const stateFile = "/var/run/cyberkiller-agent.json"
 
 // defaultAPI is the URL the agent uses to reach the CyberKiller control plane
@@ -55,12 +55,104 @@ func main() {
 		runStatus()
 	case "submit":
 		runSubmit(os.Args[2:])
+	case "tui":
+		runTUI(os.Args[2:])
 	default:
-		runFirstConnect()
+		// The one command players ever run: `sudo ./cyberkiller-agent`.
+		// If a session is already saved and no token was supplied, resume it;
+		// otherwise do a fresh connect (prompting for the token if needed).
+		if _, err := loadState(); err == nil && !hasPositionalArg(os.Args[1:]) {
+			os.Args = append([]string{os.Args[0], "connect"}, os.Args[1:]...)
+			runReconnect()
+		} else {
+			runFirstConnect()
+		}
 	}
 }
 
+// hasPositionalArg reports whether args contains a non-flag value (e.g. a token).
+func hasPositionalArg(args []string) bool {
+	for _, a := range args {
+		if a != "" && !strings.HasPrefix(a, "-") {
+			return true
+		}
+	}
+	return false
+}
+
 // ─── First-time connection ────────────────────────────────────────────────────
+
+// stdoutIsTTY reports whether we're attached to an interactive terminal (so the
+// TUI dashboard can run). Background/logged sessions are not TTYs.
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	fi2, err2 := os.Stdin.Stat()
+	return err2 == nil && fi2.Mode()&os.ModeCharDevice != 0
+}
+
+// promptToken interactively asks the player to paste their invite token, so the
+// only thing they ever need to type is `./cyberkiller-agent`.
+func promptToken() string {
+	fmt.Println("  First time here — paste your invite token to connect.")
+	fmt.Println("  (Get one at " + publicSite() + " — it starts with INV-)")
+	fmt.Print("\n  Invite token: ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func publicSite() string {
+	// derive the site root from the API base for the prompt hint
+	if strings.Contains(defaultAPI, "cyberkiller.net") {
+		return "cyberkiller.net"
+	}
+	return "the arena site"
+}
+
+// finishConnect decides what to do after a successful connect: detach to the
+// background, run the live TUI dashboard (interactive TTY), or fall back to the
+// plain text heartbeat loop (piped / logged / non-TTY).
+func finishConnect(st agentState, detach bool) {
+	switch {
+	case detach:
+		spawnBackground(st)
+	case stdoutIsTTY():
+		runDashboard(st)
+	default:
+		runLoop(st, false)
+	}
+}
+
+// runDashboard runs heartbeats in the background while the live TUI dashboard
+// owns the screen. Quitting the dashboard (q / Ctrl+C) tears the tunnel down.
+func runDashboard(st agentState) {
+	stop := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(10 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				sendHeartbeat(st, true)
+			}
+		}
+	}()
+	// Real-mode dashboard with the same animated startup sequence as the demo,
+	// then the live dashboard. On quit, stop heartbeats and run the matching
+	// animated shutdown (teardown).
+	tuiDashboard(st.Handle, st.ArenaIP, "wg0", false, true, func() {
+		close(stop)
+		teardown(st)
+	})
+}
 
 func runFirstConnect() {
 	apiEnv := os.Getenv("CK_API")
@@ -86,9 +178,13 @@ func runFirstConnect() {
 	checkForUpdate(*api)
 
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "  Error: provide your invite token")
-		fmt.Fprintln(os.Stderr, "  Usage: sudo ./cyberkiller-agent INVITE_TOKEN [--detach]")
-		os.Exit(1)
+		// No token on the command line — just ask for it. Players never need
+		// to remember any flags; `sudo ./cyberkiller-agent` is the whole UX.
+		token = promptToken()
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "  No token entered. Exiting.")
+			os.Exit(1)
+		}
 	}
 	requireRoot()
 	ensureDependencies()
@@ -165,7 +261,7 @@ func runFirstConnect() {
 	pts := fetchArenaStats(*api)
 	printWelcome(handle, reg.ArenaIP, hills, pts)
 
-	runLoop(st, *detach)
+	finishConnect(st, *detach)
 }
 
 // ─── Reconnect ────────────────────────────────────────────────────────────────
@@ -220,7 +316,7 @@ func runReconnect() {
 	pts := fetchArenaStats(st.APIBase)
 	printWelcome(st.Handle, st.ArenaIP, hills, pts)
 
-	runLoop(*st, *detach)
+	finishConnect(*st, *detach)
 }
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
@@ -286,13 +382,7 @@ func spawnBackground(st agentState) {
 // teardown brings wg0 down, removes the kill switch, sends a disconnect
 // heartbeat, and clears the background PID from the state file.
 func teardown(st agentState) {
-	fmt.Printf("\n  [▸] Disconnecting %s...\n", st.Handle)
-	exec.Command("wg-quick", "down", "wg0").Run()
-	removeKillSwitch()
-	sendHeartbeat(st, false)
-	st.BgPID = 0
-	saveState(st)
-	fmt.Println("  Tunnel down. See you next time.")
+	shutdownSequence(st)
 }
 
 // ─── Disconnect subcommand ────────────────────────────────────────────────────
@@ -663,7 +753,12 @@ func checkForUpdate(api string) {
 		return
 	}
 	fmt.Printf("UPDATE AVAILABLE (v%s)\n", info.Version)
-	applyUpdate(api, info, false) // startup: no reconnect (about to connect for first time)
+	// If we already have a saved session, the updated binary can re-exec as
+	// "connect" and drop straight into the dashboard (seamless upgrade). On a
+	// first-time connect there's no session yet, so just update and let the
+	// player re-run.
+	_, hasSession := loadState()
+	applyUpdate(api, info, hasSession == nil)
 }
 
 // ─── State file ───────────────────────────────────────────────────────────────
